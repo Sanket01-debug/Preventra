@@ -1,80 +1,76 @@
-// src/app/api/gemini/route.js
-import { NextResponse } from 'next/server';
-import { GoogleGenerativeAI } from "@google/generative-ai";
-// No need for 'fs' or 'formidable' in this App Router approach
+import { NextResponse } from "next/server";
 
-// Helper function remains the same
-function arrayBufferToGenerativePart(buffer, mimeType) {
-    return {
-        inlineData: {
-            data: Buffer.from(buffer).toString("base64"),
-            mimeType,
-        },
-    };
-}
+export async function POST(req) {
+  try {
+    const apiKey = process.env.GOOGLE_API_KEY;
+    if (!apiKey) throw new Error("Missing GOOGLE_API_KEY in environment.");
 
-export async function POST(request) {
-    const apiKey = process.env.GEMINI_API_KEY;
-    if (!apiKey) {
-        console.error("Gemini API Key not found in environment variables.");
-        return NextResponse.json(
-            { error: "API key configuration error." },
-            { status: 500 }
-        );
-    }
+    const formData = await req.formData();
+    const file = formData.get("image");
+    if (!file) throw new Error("No image file provided.");
 
-    try {
-        const formData = await request.formData();
-        const imageFile = formData.get('image');
+    const bytes = await file.arrayBuffer();
+    const base64 = Buffer.from(bytes).toString("base64");
 
-        if (!imageFile) {
-            return NextResponse.json(
-                { error: "No image file uploaded." },
-                { status: 400 }
-            );
-        }
-        if (!(imageFile instanceof File) || !imageFile.type || !imageFile.type.startsWith('image/')) {
-             console.error("Uploaded item is not a valid file or image:", imageFile);
-             return NextResponse.json(
-                 { error: 'Uploaded file is not a valid image.' },
-                 { status: 400 }
-             );
-        }
-
-        const imageBuffer = await imageFile.arrayBuffer();
-        const imagePart = arrayBufferToGenerativePart(imageBuffer, imageFile.type);
-
-        const genAI = new GoogleGenerativeAI(apiKey);
-        // *** Use the correct model name ***
-        const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" }); // Or gemini-1.5-pro
-
-        const prompt = ` Analyze this X-ray image for potential points of interest based ONLY on visually observable features. Consider aspects like bone structure, density variations, presence of foreign objects, or joint spacing. IMPORTANT: - DO NOT provide any medical diagnosis, definitive condition names, or treatment advice. - State clearly that this analysis is based purely on visual observation by an AI and is NOT a substitute for professional radiological evaluation by a qualified medical expert. - Focus on describing observations neutrally (e.g., "area of increased density noted in [location]", "fracture line appears visible at [location]", "joint spacing appears [normal/reduced/increased]"). - If the image is unclear or not an X-ray, state that analysis cannot be performed reliably. Example format: "Based on AI visual observation (this is not a medical diagnosis and requires expert review): - Bone alignment appears [describe]. - An area of [increased/decreased] density is observed near [location]. - Joint spaces look [describe]. - No obvious foreign objects detected." `;
-
-        const result = await model.generateContent([prompt, imagePart]);
-        const response = await result.response;
-        const geminiText = response.text();
-
-        // --- Prepare image data for response ---
-        const base64ImageData = Buffer.from(imageBuffer).toString('base64');
-        const imageDataUrl = `data:${imageFile.type};base64,${base64ImageData}`;
-        // --- End prepare image data ---
-
-
-        // --- Send Success Response with analysis AND image data ---
-        return NextResponse.json(
+    // Call Gemini REST API (same structure as X-ray & MRI)
+    const response = await fetch(
+      "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=" + apiKey,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          contents: [
             {
-                analysis: geminiText,
-                imageData: imageDataUrl // Include the image data URL
-            },
-            { status: 200 }
-        );
+              role: "user",
+              parts: [
+                {
+                  text: `
+                    Analyze this CT scan image based ONLY on visible structural features.
+                    Focus on density variations, symmetry, and any apparent irregularities in the scanned region
+                    (like dark/light areas, asymmetry, or abnormal shapes).
 
-    } catch (error) {
-        console.error("Error processing request:", error);
-        const errorMessage = error instanceof Error ? error.message : "An unknown error occurred";
-        return NextResponse.json(
-            { error: `An error occurred during analysis: ${errorMessage}` },
-            { status: 500 }
-        );
+                    IMPORTANT RULES:
+                    - Do NOT mention or guess any diseases, conditions, or medical terms.
+                    - Clearly state: "This is NOT a medical diagnosis."
+                    - Use neutral, descriptive language such as:
+                      "Region shows higher density compared to surrounding tissue" or
+                      "No visible irregularities or asymmetry detected."
+
+                    Example format:
+                    "AI Visual Observation (not a diagnosis):
+                    - The image shows balanced density distribution across visible structures.
+                    - No clear asymmetry or irregular contour visible.
+                    - Overall visual pattern appears uniform."
+                  `,
+                },
+                {
+                  inlineData: { mimeType: file.type, data: base64 },
+                },
+              ],
+            },
+          ],
+        }),
+      }
+    );
+
+    const data = await response.json();
+
+    if (!response.ok) {
+      throw new Error(
+        data.error?.message || "Failed to generate content from Gemini API."
+      );
     }
+
+    const text =
+      data?.candidates?.[0]?.content?.parts?.[0]?.text ||
+      "No observations found.";
+
+    return NextResponse.json({
+      analysis: text,
+      imageData: `data:${file.type};base64,${base64}`,
+    });
+  } catch (error) {
+    console.error("Gemini error:", error);
+    return NextResponse.json({ error: error.message }, { status: 500 });
+  }
 }
